@@ -1,0 +1,50 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Compilar APK debug
+        run: |
+          set -o pipefail
+          gradle assembleDebug --stacktrace 2>&1 | tee build.log
+
+      - name: Publicar APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: SONORA build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
+          make_latest: true
+
+      - name: Guardar log de errores
+        if: failure()
+        run: |
+          { grep -E '^e: |^w: ' build.log | head -n 120; echo '-----'; tail -n 150 build.log; } > /tmp/error.txt 2>&1 || echo "fallo antes de compilar (ver pasos del workflow)" > /tmp/error.txt
+          git config user.name "build-bot"
+          git config user.email "build-bot@users.noreply.github.com"
+          git checkout --orphan build-logs
+          git rm -rf . > /dev/null 2>&1 || true
+          cp /tmp/error.txt error.txt
+          git add error.txt
+          git commit -m "log de compilacion"
+          git push -f origin build-logs

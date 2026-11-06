@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.Sonora" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF050505</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>
