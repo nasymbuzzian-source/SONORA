@@ -1,5 +1,10 @@
 package app.sonora.ui
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -55,6 +60,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.sonora.MainViewModel
+import app.sonora.data.KeyKind
+import app.sonora.data.LinkRef
 import app.sonora.data.Playlist
 import app.sonora.data.Song
 import coil.compose.AsyncImage
@@ -71,6 +78,9 @@ sealed interface Dlg {
     data class NewList(val thenAdd: Song?) : Dlg
     data class RenameList(val p: Playlist) : Dlg
     data class DeleteList(val p: Playlist) : Dlg
+    data class AddLinkToList(val link: LinkRef) : Dlg
+    data class EditKey(val which: KeyKind) : Dlg
+    data class ConfirmDownload(val url: String, val name: String) : Dlg
 }
 
 sealed interface Detail {
@@ -318,7 +328,15 @@ fun ConfirmDialog(title: String, text: String, confirm: String, onDismiss: () ->
 }
 
 @Composable
-fun TextDialog(title: String, initial: String, confirm: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+fun TextDialog(
+    title: String,
+    initial: String,
+    confirm: String,
+    onDismiss: () -> Unit,
+    label: String = "Nombre",
+    allowBlank: Boolean = false,
+    onConfirm: (String) -> Unit
+) {
     var text by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -329,13 +347,13 @@ fun TextDialog(title: String, initial: String, confirm: String, onDismiss: () ->
                 value = text,
                 onValueChange = { text = it },
                 singleLine = true,
-                label = { Text("Nombre") },
+                label = { Text(label) },
                 colors = fieldColors()
             )
         },
         confirmButton = {
             TextButton(onClick = {
-                if (text.isNotBlank()) {
+                if (allowBlank || text.isNotBlank()) {
                     onConfirm(text.trim())
                     onDismiss()
                 }
@@ -373,27 +391,32 @@ fun EditSongDialog(song: Song, onDismiss: () -> Unit, onSave: (String, String, S
 
 @Composable
 fun AddToListDialog(
-    song: Song,
+    title: String,
     playlists: List<Playlist>,
-    vm: MainViewModel,
+    onPick: (Playlist) -> Unit,
     onDismiss: () -> Unit,
-    onNew: () -> Unit
+    onNew: (() -> Unit)?
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Surface2,
-        title = { Text("Añadir a una lista") },
+        title = { Text(title) },
         text = {
             LazyColumn(Modifier.heightIn(max = 320.dp)) {
-                item {
-                    Row(
-                        Modifier.fillMaxWidth().clickable(onClick = onNew).padding(vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Rounded.Add, null, tint = Brand)
-                        Spacer(Modifier.width(12.dp))
-                        Text("Nueva lista", color = Brand, fontWeight = FontWeight.SemiBold)
+                if (onNew != null) {
+                    item {
+                        Row(
+                            Modifier.fillMaxWidth().clickable(onClick = onNew).padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Rounded.Add, null, tint = Brand)
+                            Spacer(Modifier.width(12.dp))
+                            Text("Nueva lista", color = Brand, fontWeight = FontWeight.SemiBold)
+                        }
                     }
+                }
+                if (playlists.isEmpty() && onNew == null) {
+                    item { Text("Aún no tienes listas. Crea una desde la pestaña Listas de la biblioteca.", color = Muted) }
                 }
                 items(playlists, key = { it.id }) { p ->
                     Text(
@@ -401,7 +424,7 @@ fun AddToListDialog(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
-                                vm.addToPlaylist(p.id, p.name, song)
+                                onPick(p)
                                 onDismiss()
                             }
                             .padding(vertical = 12.dp),
@@ -440,8 +463,62 @@ fun Dialogs(dlg: Dlg?, vm: MainViewModel, playlists: List<Playlist>, setDlg: (Dl
         is Dlg.EditSong -> EditSongDialog(dlg.song, close) { t, ar, al ->
             vm.updateInfo(dlg.song, t, ar, al)
         }
-        is Dlg.AddToList -> AddToListDialog(dlg.song, playlists, vm, close) {
-            setDlg(Dlg.NewList(dlg.song))
+        is Dlg.AddToList -> AddToListDialog(
+            "Añadir a una lista", playlists,
+            { p -> vm.addToPlaylist(p.id, p.name, dlg.song) }, close
+        ) { setDlg(Dlg.NewList(dlg.song)) }
+        is Dlg.AddLinkToList -> AddToListDialog(
+            "Añadir enlace a una lista", playlists,
+            { p -> vm.addLinkToPlaylist(p.id, p.name, dlg.link.id) }, close, null
+        )
+        is Dlg.ConfirmDownload -> ConfirmDialog(
+            "Descargar archivo",
+            "Se descargará «${dlg.name}» a tu biblioteca. Confirma que tienes derecho a usar este archivo: es tuyo, tiene licencia libre o tienes permiso.",
+            "Descargar", close
+        ) { vm.downloadUrl(dlg.url, dlg.name); close() }
+        is Dlg.EditKey -> {
+            val current = when (dlg.which) {
+                KeyKind.Jamendo -> vm.jamendoId.value
+                KeyKind.SpotifyId -> vm.spotifyId.value
+                KeyKind.SpotifySecret -> vm.spotifySecret.value
+            }
+            val title = when (dlg.which) {
+                KeyKind.Jamendo -> "Client ID de Jamendo"
+                KeyKind.SpotifyId -> "Client ID de Spotify"
+                KeyKind.SpotifySecret -> "Client Secret de Spotify"
+            }
+            TextDialog(title, current, "Guardar", close, "Clave (vacío para borrar)", true) { v ->
+                vm.setKey(dlg.which, v)
+            }
         }
+    }
+}
+
+// ---------- Imágenes remotas y enlaces externos ----------
+
+@Composable
+fun CoverUrl(url: String?, modifier: Modifier, radius: Dp) {
+    Box(
+        modifier.clip(RoundedCornerShape(radius)).background(Surface2),
+        contentAlignment = Alignment.Center
+    ) {
+        if (!url.isNullOrBlank()) {
+            AsyncImage(
+                model = url,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Icon(Icons.Rounded.MusicNote, null, tint = Muted)
+        }
+    }
+}
+
+fun openExternal(ctx: Context, url: String) {
+    try {
+        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(ctx, "No hay ninguna app para abrir este enlace", Toast.LENGTH_SHORT).show()
     }
 }

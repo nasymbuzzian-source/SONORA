@@ -89,6 +89,8 @@ fun SonoraApp(vm: MainViewModel) {
     val songs by vm.songs.collectAsStateWithLifecycle()
     val playlists by vm.playlists.collectAsStateWithLifecycle()
     val entries by vm.playlistEntries.collectAsStateWithLifecycle()
+    val links by vm.links.collectAsStateWithLifecycle()
+    val linkEntries by vm.linkEntries.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var showPlayer by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(Tab.Home) }
@@ -166,6 +168,8 @@ fun SonoraApp(vm: MainViewModel) {
                             val byId = remember(songs) { songs.associateBy { it.id } }
                             val ids = entries[p.id].orEmpty()
                             val list = remember(ids, byId) { ids.mapNotNull { byId[it] } }
+                            val linkById = remember(links) { links.associateBy { it.id } }
+                            val linkList = linkEntries[p.id].orEmpty().mapNotNull { linkById[it] }
                             DetailScreen(
                                 title = p.name,
                                 subtitle = "Lista · ${list.size} canciones",
@@ -183,6 +187,13 @@ fun SonoraApp(vm: MainViewModel) {
                                         MenuAction("Subir en la lista") { vm.moveInPlaylist(p.id, s.id, -1) },
                                         MenuAction("Bajar en la lista") { vm.moveInPlaylist(p.id, s.id, 1) },
                                         MenuAction("Quitar de esta lista") { vm.removeFromPlaylist(p.id, s.id) }
+                                    )
+                                },
+                                links = linkList,
+                                linkMenu = { l ->
+                                    listOf(
+                                        MenuAction("Abrir en ${l.service}") { openExternal(ctx, l.url) },
+                                        MenuAction("Quitar de esta lista") { vm.removeLinkFromPlaylist(p.id, l.id) }
                                     )
                                 }
                             )
@@ -213,7 +224,7 @@ fun SonoraApp(vm: MainViewModel) {
                     else -> when (tab) {
                         Tab.Home -> HomeScreen(vm, songs, playlists, entries, actions)
                         Tab.Search -> SearchScreen(vm, songs, playlists, actions)
-                        Tab.Library -> LibraryScreen(vm, songs, playlists, entries, actions)
+                        Tab.Library -> LibraryScreen(vm, songs, playlists, entries, links, actions)
                         Tab.Settings -> SettingsScreen(vm, songs.size, actions)
                     }
                 }

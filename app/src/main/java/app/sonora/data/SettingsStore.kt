@@ -14,13 +14,32 @@ import kotlinx.coroutines.flow.map
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
+enum class KeyKind { Jamendo, SpotifyId, SpotifySecret }
+
 class SettingsStore(private val ctx: Context) {
     private val accentKey = intPreferencesKey("accent")
     private val restoreKey = booleanPreferencesKey("restore_queue")
     private val stateKey = stringPreferencesKey("player_state")
+    private val jamendoKey = stringPreferencesKey("jamendo_id")
+    private val spotifyIdKey = stringPreferencesKey("spotify_id")
+    private val spotifySecretKey = stringPreferencesKey("spotify_secret")
 
     val accent: Flow<Int> = ctx.dataStore.data.map { it[accentKey] ?: 0 }
     val restore: Flow<Boolean> = ctx.dataStore.data.map { it[restoreKey] ?: true }
+
+    val jamendoId: Flow<String> = ctx.dataStore.data.map { it[jamendoKey] ?: "" }
+    val spotifyId: Flow<String> = ctx.dataStore.data.map { it[spotifyIdKey] ?: "" }
+    val spotifySecret: Flow<String> = ctx.dataStore.data.map { it[spotifySecretKey] ?: "" }
+
+    suspend fun setKey(kind: KeyKind, value: String) {
+        ctx.dataStore.edit {
+            when (kind) {
+                KeyKind.Jamendo -> it[jamendoKey] = value
+                KeyKind.SpotifyId -> it[spotifyIdKey] = value
+                KeyKind.SpotifySecret -> it[spotifySecretKey] = value
+            }
+        }
+    }
 
     suspend fun setAccent(i: Int) {
         ctx.dataStore.edit { it[accentKey] = i }

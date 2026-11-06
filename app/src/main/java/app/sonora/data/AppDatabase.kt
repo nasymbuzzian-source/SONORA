@@ -92,10 +92,55 @@ val MIGRATION_1_2 = object : Migration(1, 2) {
     }
 }
 
-@Database(entities = [Song::class, Playlist::class, PlaylistSong::class], version = 2, exportSchema = false)
+@Dao
+interface LinkDao {
+    @Query("SELECT * FROM links ORDER BY addedAt DESC")
+    fun all(): Flow<List<LinkRef>>
+
+    @Query("SELECT * FROM links")
+    suspend fun allNow(): List<LinkRef>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(l: LinkRef): Long
+
+    @Query("DELETE FROM links WHERE id = :id")
+    suspend fun delete(id: Long)
+
+    @Query("SELECT * FROM playlist_links ORDER BY playlistId, position")
+    fun allEntries(): Flow<List<PlaylistLink>>
+
+    @Query("SELECT * FROM playlist_links ORDER BY playlistId, position")
+    suspend fun entriesNow(): List<PlaylistLink>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun addEntry(e: PlaylistLink)
+
+    @Query("DELETE FROM playlist_links WHERE playlistId = :pid AND linkId = :lid")
+    suspend fun removeEntry(pid: Long, lid: Long)
+
+    @Query("SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_links WHERE playlistId = :pid")
+    suspend fun nextPosition(pid: Long): Int
+}
+
+val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS `links` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `url` TEXT NOT NULL, `service` TEXT NOT NULL, `kind` TEXT NOT NULL, `title` TEXT NOT NULL, `artist` TEXT, `thumbnail` TEXT, `addedAt` INTEGER NOT NULL)")
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_links_url` ON `links` (`url`)")
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `playlist_links` (`playlistId` INTEGER NOT NULL, `linkId` INTEGER NOT NULL, `position` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`playlistId`, `linkId`), " +
+                "FOREIGN KEY(`playlistId`) REFERENCES `playlists`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , " +
+                "FOREIGN KEY(`linkId`) REFERENCES `links`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )"
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_playlist_links_linkId` ON `playlist_links` (`linkId`)")
+    }
+}
+
+@Database(entities = [Song::class, Playlist::class, PlaylistSong::class, LinkRef::class, PlaylistLink::class], version = 3, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
     abstract fun playlistDao(): PlaylistDao
+    abstract fun linkDao(): LinkDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null
@@ -103,7 +148,7 @@ abstract class AppDatabase : RoomDatabase() {
         fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext, AppDatabase::class.java, "sonora.db"
-            ).addMigrations(MIGRATION_1_2).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
         }
     }
 }

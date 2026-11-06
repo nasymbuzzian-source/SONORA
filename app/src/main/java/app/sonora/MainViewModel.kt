@@ -15,6 +15,17 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.room.withTransaction
 import app.sonora.data.AppDatabase
+import app.sonora.data.ArchiveSource
+import app.sonora.data.Hint
+import app.sonora.data.JamendoSource
+import app.sonora.data.KeyKind
+import app.sonora.data.LegalSource
+import app.sonora.data.LinkInfo
+import app.sonora.data.LinkRef
+import app.sonora.data.LinkResolver
+import app.sonora.data.Net
+import app.sonora.data.PlaylistLink
+import app.sonora.data.RemoteTrack
 import app.sonora.data.Playlist
 import app.sonora.data.PlaylistSong
 import app.sonora.data.SettingsStore
@@ -23,6 +34,9 @@ import app.sonora.data.SongImporter
 import app.sonora.data.toMediaItem
 import app.sonora.playback.PlaybackService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -39,6 +53,7 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     private val db = AppDatabase.get(app)
     private val dao = db.songDao()
     private val pdao = db.playlistDao()
+    private val ldao = db.linkDao()
     private val store = SettingsStore(app)
     private var controller: MediaController? = null
     private var lastMarkedId: Long? = null
@@ -57,6 +72,34 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     // ---- Ajustes ----
     val accent: StateFlow<Int> = store.accent.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
     val restoreQueue: StateFlow<Boolean> = store.restore.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val jamendoId: StateFlow<String> = store.jamendoId.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    val spotifyId: StateFlow<String> = store.spotifyId.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    val spotifySecret: StateFlow<String> = store.spotifySecret.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
+    // ---- Enlaces guardados ----
+    val links: StateFlow<List<LinkRef>> =
+        ldao.all().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val linkEntries: StateFlow<Map<Long, List<Long>>> =
+        ldao.allEntries()
+            .map { list -> list.groupBy({ it.playlistId }, { it.linkId }) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    var linkLoading by mutableStateOf(false)
+        private set
+    var linkInfo by mutableStateOf<LinkInfo?>(null)
+        private set
+    var linkError by mutableStateOf<String?>(null)
+        private set
+    var freeResults by mutableStateOf<List<RemoteTrack>>(emptyList())
+        private set
+    var freeLoading by mutableStateOf(false)
+        private set
+    var freeError by mutableStateOf<String?>(null)
+        private set
+    var downloading by mutableStateOf<String?>(null)
+        private set
+    var downloadProgress by mutableStateOf<Float?>(null)
+        private set
 
     var importing by mutableStateOf(false)
         private set
@@ -295,6 +338,13 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     fun delete(s: Song) {
         viewModelScope.launch(Dispatchers.IO) {
             s.coverPath?.let { File(it).delete() }
+            runCatching {
+                val u = Uri.parse(s.uri)
+                if (u.scheme == "file") {
+                    val f = File(u.path ?: "")
+                    if (f.absolutePath.startsWith(File(app.filesDir, "music").absolutePath)) f.delete()
+                }
+            }
             dao.delete(s.id)
         }
     }
@@ -349,7 +399,123 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---- Enlaces ----
+    fun resolveLink(raw: String) {
+        viewModelScope.launch {
+            linkLoading = true
+            linkInfo = null
+            linkError = null
+            val parsed = LinkResolver.parse(raw)
+            if (parsed == null) {
+                linkError = "No reconozco ese enlace. Prueba con uno de Spotify, YouTube o YouTube Music."
+            } else {
+                val r = runCatching { LinkResolver.resolve(parsed, spotifyId.value, spotifySecret.value) }
+                linkInfo = r.getOrNull() ?: LinkInfo(
+                    parsed.original, parsed.service, parsed.kind, "Enlace de ${parsed.service}",
+                    null, null, null, null, parsed.service == "Archivo de audio"
+                )
+                if (r.isFailure) linkError = "No pude leer los datos del enlace (¿sin conexión?). Puedes guardarlo igualmente."
+            }
+            linkLoading = false
+        }
+    }
+
+    fun saveLink(i: LinkInfo) {
+        viewModelScope.launch {
+            val id = ldao.insert(
+                LinkRef(url = i.url, service = i.service, kind = i.kind, title = i.title, artist = i.artist, thumbnail = i.thumbnail)
+            )
+            message = if (id == -1L) "Ese enlace ya estaba guardado" else "Enlace guardado en tu biblioteca"
+        }
+    }
+
+    fun deleteLink(id: Long) {
+        viewModelScope.launch { ldao.delete(id) }
+    }
+
+    fun addLinkToPlaylist(pid: Long, name: String, linkId: Long) {
+        viewModelScope.launch {
+            val exists = ldao.entriesNow().any { it.playlistId == pid && it.linkId == linkId }
+            if (exists) {
+                message = "Ya está en «$name»"
+            } else {
+                ldao.addEntry(PlaylistLink(pid, linkId, ldao.nextPosition(pid)))
+                message = "Enlace añadido a «$name»"
+            }
+        }
+    }
+
+    fun removeLinkFromPlaylist(pid: Long, linkId: Long) {
+        viewModelScope.launch { ldao.removeEntry(pid, linkId) }
+    }
+
+    // ---- Música libre (fuentes con licencia) ----
+    private fun sources(): List<LegalSource> = listOfNotNull(
+        jamendoId.value.takeIf { it.isNotBlank() }?.let { JamendoSource(it.trim()) },
+        ArchiveSource()
+    )
+
+    fun searchFree(q: String) {
+        if (q.isBlank()) return
+        viewModelScope.launch {
+            freeLoading = true
+            freeError = null
+            freeResults = emptyList()
+            val res = withContext(Dispatchers.IO) {
+                coroutineScope {
+                    sources().map { s -> async { runCatching { s.search(q.trim()) }.getOrDefault(emptyList()) } }
+                        .awaitAll().flatten()
+                }
+            }
+            freeResults = res
+            freeLoading = false
+            if (res.isEmpty()) freeError = "Sin resultados con licencia libre para «${q.trim()}». Prueba con otras palabras."
+        }
+    }
+
+    fun downloadTrack(t: RemoteTrack) {
+        startDownload(t.title, "${t.source}-${t.id}", t.downloadUrl, t.ext, Hint(t.title, t.artist, t.album, t.coverUrl))
+    }
+
+    fun downloadUrl(url: String, name: String) {
+        val ext = Uri.parse(url).lastPathSegment?.substringAfterLast('.', "mp3")?.lowercase()?.takeIf { it.length in 2..5 } ?: "mp3"
+        startDownload(name, "url-${url.hashCode().toUInt()}", url, ext, Hint(name, null, null, null, force = false))
+    }
+
+    private fun startDownload(label: String, key: String, url: String, ext: String, hint: Hint?) {
+        if (downloading != null) {
+            message = "Ya hay una descarga en curso"
+            return
+        }
+        viewModelScope.launch {
+            downloading = label
+            downloadProgress = 0f
+            val dir = File(app.filesDir, "music").apply { mkdirs() }
+            val f = File(dir, key.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80) + "." + ext)
+            val uri = Uri.fromFile(f)
+            val result = runCatching {
+                if (dao.count(uri.toString()) > 0) return@runCatching false
+                Net.download(url, f) { downloadProgress = it }
+                val ok = SongImporter.importOne(app, uri, dao, hint)
+                if (!ok) error("importación fallida")
+                true
+            }
+            if (result.isFailure && dao.count(uri.toString()) == 0) f.delete()
+            downloading = null
+            downloadProgress = null
+            message = when {
+                result.isFailure -> "No se pudo descargar «$label»"
+                result.getOrNull() == false -> "«$label» ya está en tu biblioteca"
+                else -> "«$label» añadida a tu biblioteca"
+            }
+        }
+    }
+
     // ---- Ajustes y copia de seguridad ----
+    fun setKey(kind: KeyKind, value: String) {
+        viewModelScope.launch { store.setKey(kind, value.trim()) }
+    }
+
     fun setAccent(i: Int) {
         viewModelScope.launch { store.setAccent(i) }
     }
@@ -369,6 +535,17 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
                 root.put("accent", store.accent.first())
                 root.put("restoreQueue", store.restore.first())
                 root.put("favorites", JSONArray(all.filter { it.favorite }.map { it.uri }))
+                val allLinks = ldao.allNow()
+                val linkById = allLinks.associateBy { it.id }
+                val linkEntriesNow = ldao.entriesNow()
+                val linksJson = JSONArray()
+                allLinks.forEach { l ->
+                    linksJson.put(
+                        JSONObject().put("url", l.url).put("service", l.service).put("kind", l.kind)
+                            .put("title", l.title).put("artist", l.artist ?: "").put("thumbnail", l.thumbnail ?: "")
+                    )
+                }
+                root.put("links", linksJson)
                 val lists = JSONArray()
                 pdao.allNow().forEach { p ->
                     val o = JSONObject()
@@ -376,6 +553,10 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
                     o.put(
                         "songs",
                         JSONArray(entries.filter { it.playlistId == p.id }.mapNotNull { byId[it.songId]?.uri })
+                    )
+                    o.put(
+                        "links",
+                        JSONArray(linkEntriesNow.filter { it.playlistId == p.id }.mapNotNull { linkById[it.linkId]?.url })
                     )
                     lists.put(o)
                 }
@@ -399,6 +580,21 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
                 store.setRestore(root.optBoolean("restoreQueue", true))
                 val favs = root.optJSONArray("favorites")
                 if (favs != null) for (i in 0 until favs.length()) dao.favoriteByUri(favs.getString(i))
+                val linksArr = root.optJSONArray("links")
+                if (linksArr != null) for (i in 0 until linksArr.length()) {
+                    val o = linksArr.getJSONObject(i)
+                    ldao.insert(
+                        LinkRef(
+                            url = o.getString("url"),
+                            service = o.optString("service"),
+                            kind = o.optString("kind"),
+                            title = o.optString("title"),
+                            artist = o.optString("artist").ifBlank { null },
+                            thumbnail = o.optString("thumbnail").ifBlank { null }
+                        )
+                    )
+                }
+                val linkByUrl = ldao.allNow().associateBy { it.url }
                 val byUri = dao.allNow().associateBy { it.uri }
                 val existing = pdao.allNow().map { it.name }.toSet()
                 var made = 0
@@ -413,6 +609,12 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
                     if (arr != null) for (k in 0 until arr.length()) {
                         val s = byUri[arr.getString(k)] ?: continue
                         pdao.addEntry(PlaylistSong(pid, s.id, pos++))
+                    }
+                    val larr = o.optJSONArray("links")
+                    var lpos = 0
+                    if (larr != null) for (k in 0 until larr.length()) {
+                        val l = linkByUrl[larr.getString(k)] ?: continue
+                        ldao.addEntry(PlaylistLink(pid, l.id, lpos++))
                     }
                     made++
                 }

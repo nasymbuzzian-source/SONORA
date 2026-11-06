@@ -42,6 +42,29 @@ data class Playlist(
 )
 data class PlaylistSong(val playlistId: Long, val songId: Long, val position: Int)
 
+@Entity(tableName = "links", indices = [Index(value = ["url"], unique = true)])
+data class LinkRef(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val url: String,
+    val service: String,
+    val kind: String,
+    val title: String,
+    val artist: String?,
+    val thumbnail: String?,
+    val addedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "playlist_links",
+    primaryKeys = ["playlistId", "linkId"],
+    foreignKeys = [
+        ForeignKey(entity = Playlist::class, parentColumns = ["id"], childColumns = ["playlistId"], onDelete = ForeignKey.CASCADE),
+        ForeignKey(entity = LinkRef::class, parentColumns = ["id"], childColumns = ["linkId"], onDelete = ForeignKey.CASCADE)
+    ],
+    indices = [Index(value = ["linkId"])]
+)
+data class PlaylistLink(val playlistId: Long, val linkId: Long, val position: Int)
+
 fun Song.toMediaItem(): MediaItem = MediaItem.Builder()
     .setMediaId(id.toString())
     .setUri(uri)

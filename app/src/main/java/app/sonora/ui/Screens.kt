@@ -63,6 +63,8 @@ import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.sonora.MainViewModel
+import app.sonora.data.KeyKind
+import app.sonora.data.LinkRef
 import app.sonora.data.Playlist
 import app.sonora.data.Song
 import java.util.Calendar
@@ -70,7 +72,7 @@ import java.util.Calendar
 // ---------- Utilidades de pantalla ----------
 
 @Composable
-private fun ScreenHeader(title: String, trailing: @Composable () -> Unit = {}) {
+fun ScreenHeader(title: String, trailing: @Composable () -> Unit = {}) {
     Row(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -100,7 +102,7 @@ private fun AddMenuButton(a: Actions) {
     }
 }
 
-private fun LazyListScope.songItems(
+fun LazyListScope.songItems(
     list: List<Song>,
     vm: MainViewModel,
     a: Actions,
@@ -112,7 +114,7 @@ private fun LazyListScope.songItems(
 }
 
 @Composable
-private fun GroupRow(
+fun GroupRow(
     title: String,
     subtitle: String,
     coverPath: String?,
@@ -248,88 +250,11 @@ fun HomeScreen(
     }
 }
 
-// ---------- Buscar ----------
-
-@Composable
-fun SearchScreen(vm: MainViewModel, songs: List<Song>, playlists: List<Playlist>, a: Actions) {
-    var q by remember { mutableStateOf("") }
-    val query = q.trim()
-    val songHits = remember(songs, query) {
-        if (query.isEmpty()) emptyList()
-        else songs.filter { it.title.contains(query, true) || it.artist.contains(query, true) || it.album.contains(query, true) }
-    }
-    val artistHits = remember(songs, query) {
-        if (query.isEmpty()) emptyList() else songs.map { it.artist }.distinct().filter { it.contains(query, true) }
-    }
-    val albumHits = remember(songs, query) {
-        if (query.isEmpty()) emptyList() else songs.map { it.album }.distinct().filter { it.contains(query, true) }
-    }
-    val listHits = remember(playlists, query) {
-        if (query.isEmpty()) emptyList() else playlists.filter { it.name.contains(query, true) }
-    }
-    val none = query.isNotEmpty() && songHits.isEmpty() && artistHits.isEmpty() && albumHits.isEmpty() && listHits.isEmpty()
-
-    Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        ScreenHeader("Buscar")
-        OutlinedTextField(
-            value = q,
-            onValueChange = { q = it },
-            singleLine = true,
-            placeholder = { Text("Canciones, artistas, álbumes o listas", color = Muted) },
-            leadingIcon = { Icon(Icons.Rounded.Search, null, tint = Muted) },
-            trailingIcon = {
-                if (q.isNotEmpty()) {
-                    IconButton(onClick = { q = "" }) { Icon(Icons.Rounded.Close, "Borrar búsqueda", tint = Muted) }
-                }
-            },
-            shape = RoundedCornerShape(28.dp),
-            colors = fieldColors(),
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)
-        )
-        when {
-            query.isEmpty() -> EmptyState(
-                Icons.Rounded.Search,
-                "Busca en tu música",
-                "Escribe el nombre de una canción, un artista, un álbum o una lista."
-            )
-            none -> EmptyState(Icons.Rounded.Search, "Sin resultados", "No hay nada que coincida con «$query».")
-            else -> LazyColumn(contentPadding = PaddingValues(bottom = 16.dp)) {
-                if (artistHits.isNotEmpty()) {
-                    item { SectionTitle("Artistas") }
-                    items(artistHits, key = { "artist:$it" }) { name ->
-                        val list = songs.filter { it.artist == name }
-                        GroupRow(name, "${list.size} canciones", list.firstNotNullOfOrNull { it.coverPath }, true,
-                            { a.open(Detail.ArtistD(name)) })
-                    }
-                }
-                if (albumHits.isNotEmpty()) {
-                    item { SectionTitle("Álbumes") }
-                    items(albumHits, key = { "album:$it" }) { name ->
-                        val list = songs.filter { it.album == name }
-                        GroupRow(name, "${list.firstOrNull()?.artist ?: ""} · ${list.size} canciones",
-                            list.firstNotNullOfOrNull { it.coverPath }, false, { a.open(Detail.AlbumD(name)) })
-                    }
-                }
-                if (listHits.isNotEmpty()) {
-                    item { SectionTitle("Listas") }
-                    items(listHits, key = { "list:${it.id}" }) { p ->
-                        GroupRow(p.name, "Lista de reproducción", null, false, { a.open(Detail.PlaylistD(p.id)) })
-                    }
-                }
-                if (songHits.isNotEmpty()) {
-                    item { SectionTitle("Canciones") }
-                    songItems(songHits, vm, a)
-                }
-            }
-        }
-    }
-}
-
 // ---------- Biblioteca ----------
 
 private enum class LibTab(val label: String) {
     Songs("Canciones"), Recent("Recientes"), Favs("Favoritos"),
-    Lists("Listas"), Artists("Artistas"), Albums("Álbumes")
+    Lists("Listas"), Artists("Artistas"), Albums("Álbumes"), Links("Enlaces")
 }
 
 @Composable
@@ -338,8 +263,10 @@ fun LibraryScreen(
     songs: List<Song>,
     playlists: List<Playlist>,
     entries: Map<Long, List<Long>>,
+    links: List<LinkRef>,
     a: Actions
 ) {
+    val ctx = LocalContext.current
     var tab by remember { mutableStateOf(LibTab.Songs) }
     val byId = remember(songs) { songs.associateBy { it.id } }
     val sorted = remember(songs) { songs.sortedBy { it.title.lowercase() } }
@@ -412,6 +339,21 @@ fun LibraryScreen(
                             { a.open(Detail.ArtistD(name)) })
                     }
                 }
+                LibTab.Links -> {
+                    if (links.isEmpty()) item {
+                        EmptyState(Icons.Rounded.LibraryMusic, "Sin enlaces guardados",
+                            "Pega un enlace en Buscar → Enlaces y guárdalo aquí como referencia.")
+                    } else items(links, key = { it.id }) { l ->
+                        LinkRow(
+                            l,
+                            listOf(
+                                MenuAction("Abrir en ${l.service}") { openExternal(ctx, l.url) },
+                                MenuAction("Añadir a una lista") { a.dialog(Dlg.AddLinkToList(l)) },
+                                MenuAction("Eliminar") { vm.deleteLink(l.id) }
+                            )
+                        ) { openExternal(ctx, l.url) }
+                    }
+                }
                 LibTab.Albums -> {
                     if (albums.isEmpty()) item {
                         EmptyState(Icons.Rounded.LibraryMusic, "Sin álbumes", "Añade música para verla agrupada por álbum.")
@@ -437,8 +379,11 @@ fun DetailScreen(
     a: Actions,
     onBack: () -> Unit,
     topMenu: List<MenuAction> = emptyList(),
-    extra: (Song) -> List<MenuAction> = { emptyList() }
+    extra: (Song) -> List<MenuAction> = { emptyList() },
+    links: List<LinkRef> = emptyList(),
+    linkMenu: (LinkRef) -> List<MenuAction> = { emptyList() }
 ) {
+    val ctx = LocalContext.current
     var menu by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().statusBarsPadding(), contentPadding = PaddingValues(bottom = 16.dp)) {
         item {
@@ -479,6 +424,12 @@ fun DetailScreen(
         } else {
             songItems(list, vm, a, extra)
         }
+        if (links.isNotEmpty()) {
+            item { SectionTitle("Enlaces guardados") }
+            items(links, key = { "link:${it.id}" }) { l ->
+                LinkRow(l, linkMenu(l)) { openExternal(ctx, l.url) }
+            }
+        }
     }
 }
 
@@ -515,6 +466,9 @@ fun SettingsScreen(vm: MainViewModel, songCount: Int, a: Actions) {
     val ctx = LocalContext.current
     val accent by vm.accent.collectAsStateWithLifecycle()
     val restore by vm.restoreQueue.collectAsStateWithLifecycle()
+    val jamendo by vm.jamendoId.collectAsStateWithLifecycle()
+    val spotifyId by vm.spotifyId.collectAsStateWithLifecycle()
+    val spotifySecret by vm.spotifySecret.collectAsStateWithLifecycle()
     val version = remember {
         runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "?"
     }
@@ -570,6 +524,25 @@ fun SettingsScreen(vm: MainViewModel, songCount: Int, a: Actions) {
             })
         }
         SettingRow("Archivos de música", "SONORA solo accede a los archivos y carpetas que tú eliges.")
+
+        SettingsTitle("Música libre y enlaces (opcional)")
+        SettingRow(
+            "Jamendo",
+            if (jamendo.isBlank()) "Sin configurar. Regístrate gratis en devportal.jamendo.com y pega tu Client ID."
+            else "Client ID guardado."
+        ) { PillButton("Editar", Icons.Rounded.Add, false, { a.dialog(Dlg.EditKey(KeyKind.Jamendo)) }) }
+        SettingRow(
+            "Spotify: Client ID",
+            if (spotifyId.isBlank()) "Sin configurar." else "Guardado."
+        ) { PillButton("Editar", Icons.Rounded.Add, false, { a.dialog(Dlg.EditKey(KeyKind.SpotifyId)) }) }
+        SettingRow(
+            "Spotify: Client Secret",
+            if (spotifySecret.isBlank()) "Sin configurar." else "Guardado."
+        ) { PillButton("Editar", Icons.Rounded.Add, false, { a.dialog(Dlg.EditKey(KeyKind.SpotifySecret)) }) }
+        SettingRow(
+            "Para qué sirven",
+            "Con las claves de Spotify (developer.spotify.com/dashboard), los enlaces muestran también artista, álbum y duración. Las claves se guardan solo en tu teléfono y no entran en la copia de seguridad."
+        )
 
         SettingsTitle("Copia de seguridad")
         SettingRow("Preferencias, favoritos y listas", "Se guardan en un archivo que tú eliges.")

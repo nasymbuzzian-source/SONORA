@@ -11,14 +11,23 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
+/** Metadatos conocidos de antemano (p. ej. de Jamendo). Si force es true, mandan sobre las etiquetas del archivo. */
+data class Hint(
+    val title: String?,
+    val artist: String?,
+    val album: String?,
+    val coverUrl: String?,
+    val force: Boolean = true
+)
+
 object SongImporter {
 
     /** Devuelve true si la canción se añadió; false si ya existía o no se pudo leer. */
-    suspend fun importOne(ctx: Context, uri: Uri, dao: SongDao): Boolean = withContext(Dispatchers.IO) {
+    suspend fun importOne(ctx: Context, uri: Uri, dao: SongDao, hint: Hint? = null): Boolean = withContext(Dispatchers.IO) {
         runCatching {
             try {
                 ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            } catch (_: SecurityException) {
+            } catch (_: Exception) {
             }
             if (dao.count(uri.toString()) > 0) return@runCatching false
 
@@ -28,19 +37,37 @@ object SongImporter {
                 val duration = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                     ?.toLongOrNull() ?: return@runCatching false
 
-                val title = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
-                    ?.takeIf { it.isNotBlank() } ?: displayName(ctx, uri)
-                val artist = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
-                    ?.takeIf { it.isNotBlank() }
-                    ?: mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST)
-                        ?.takeIf { it.isNotBlank() }
-                    ?: "Artista desconocido"
-                val album = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
-                    ?.takeIf { it.isNotBlank() } ?: "Álbum desconocido"
+                fun pick(h: String?, tag: String?, fallback: String): String =
+                    (if (hint?.force == true) h?.takeIf { it.isNotBlank() } else null)
+                        ?: tag?.takeIf { it.isNotBlank() }
+                        ?: h?.takeIf { it.isNotBlank() }
+                        ?: fallback
+                val title = pick(
+                    hint?.title,
+                    mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE),
+                    displayName(ctx, uri)
+                )
+                val artist = pick(
+                    hint?.artist,
+                    mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
+                        ?: mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST),
+                    "Artista desconocido"
+                )
+                val album = pick(
+                    hint?.album,
+                    mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM),
+                    "Álbum desconocido"
+                )
 
+                val dir = File(ctx.filesDir, "covers").apply { mkdirs() }
                 val coverPath = mmr.embeddedPicture?.let { bytes ->
-                    val dir = File(ctx.filesDir, "covers").apply { mkdirs() }
                     File(dir, "${UUID.randomUUID()}.img").apply { writeBytes(bytes) }.absolutePath
+                } ?: hint?.coverUrl?.let { u ->
+                    runCatching {
+                        val f = File(dir, "${UUID.randomUUID()}.img")
+                        Net.download(u, f)
+                        f.absolutePath
+                    }.getOrNull()
                 }
 
                 dao.insert(
@@ -80,5 +107,6 @@ object SongImporter {
         ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
             ?.use { if (it.moveToFirst()) it.getString(0) else null }
             ?.substringBeforeLast('.')
+            ?: uri.lastPathSegment?.substringBeforeLast('.')
             ?: "Sin título"
 }
