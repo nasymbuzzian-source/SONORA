@@ -5,6 +5,7 @@ import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -57,6 +58,22 @@ object SongImporter {
                 mmr.release()
             }
         }.getOrDefault(false)
+    }
+
+    /** Recorre una carpeta (y subcarpetas) y devuelve los archivos de audio. */
+    fun listAudio(ctx: Context, tree: Uri): List<Uri> {
+        val out = mutableListOf<Uri>()
+        fun walk(dir: DocumentFile?) {
+            dir?.listFiles()?.forEach { f ->
+                if (f.isDirectory) {
+                    walk(f)
+                } else if (f.type?.startsWith("audio/") == true || f.type == "application/ogg") {
+                    out.add(f.uri)
+                }
+            }
+        }
+        walk(DocumentFile.fromTreeUri(ctx, tree))
+        return out
     }
 
     private fun displayName(ctx: Context, uri: Uri): String =
